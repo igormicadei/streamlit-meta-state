@@ -1,116 +1,105 @@
-"""
-Module for managing Streamlit session state using descriptors and a metaclass.
-
-This module provides a mechanism to automatically bind class attributes (defined via
-type annotations) to Streamlit's session state. It leverages the `SessionVar` descriptor to
-synchronize attribute values with the session state and the `MetaSessionState` metaclass to
-ensure that instances are uniquely stored and retrieved based on a session key.
-"""
-
 from typing import Any
-
 from streamlit.runtime.state.common import require_valid_user_key
 from streamlit.runtime.state import get_session_state
 from streamlit.runtime.state.safe_session_state import SafeSessionState
 
 
 class SessionVar:
-    """
-    Descriptor to store and retrieve attribute values in Streamlit's session state.
+    """A descriptor that stores values in Streamlit's session_state, while also exposing a read-only `key` property."""
 
-    This descriptor synchronizes an attribute with Streamlit's session state. It maintains
-    a local cache on the instance (using the instance's __dict__) to avoid repeated lookups
-    and to ensure consistency between the in-memory value and the session state value.
-    """
+    class _Wrapper:
+        """A wrapper that enables `.key` storage and type delegation, while making `key` read-only."""
+
+        def __init__(self, value, key, descriptor, instance):
+            object.__setattr__(self, "_value", value)
+            object.__setattr__(self, "_key", key)  # Read-only key
+            object.__setattr__(self, "_descriptor", descriptor)
+            object.__setattr__(self, "_instance", instance)
+
+        @property
+        def key(self):
+            """Read-only access to the session key."""
+            return object.__getattribute__(self, "_key")
+
+        def __getattr__(self, item):
+            """First check if `self` has the attribute; otherwise, delegate to `_value`."""
+            if item in ("_value", "_key", "_descriptor", "_instance"):
+                return object.__getattribute__(self, item)
+            return getattr(self._value, item)
+
+        def __setattr__(self, name, value):
+            """Allow setting attributes while ensuring key updates are stored properly."""
+            if name in ("_value", "_key", "_descriptor", "_instance"):
+                raise AttributeError(f"Cannot modify attribute '{name}' directly.")
+            setattr(self._value, name, value)
+
+        def __str__(self):
+            return str(self._value)
+
+        def __repr__(self):
+            return repr(self._value)
+
+        def __call__(self, *args, **kwargs):
+            """Allow callable values to be called directly."""
+            if callable(self._value):
+                return self._value(*args, **kwargs)
+            raise TypeError(f"'{type(self._value).__name__}' object is not callable")
+
+        def __eq__(self, other):
+            """Support equality checks against the stored value."""
+            return self._value == other
+
+        def __getitem__(self, item):
+            """Support indexing if the stored value is indexable (list, dict, etc.)."""
+            return self._value[item]
+
+        def __setitem__(self, key, value):
+            """Support item assignment if the stored value is mutable."""
+            self._value[key] = value
+
+        def __iter__(self):
+            """Support iteration if the stored value is iterable."""
+            return iter(self._value)
+
+        def __len__(self):
+            """Support len() if the stored value supports it."""
+            return len(self._value)
 
     def __init__(self, name: str) -> None:
-        """
-        Initialize the SessionVar descriptor.
-
-        Args:
-            name (str): The name of the attribute to be managed.
-        """
         self.name: str = name
 
-        # Store the session state key for this attribute, generated when
-        # `_make_key` is called.
-        self._key: str | None = None
-
-    @property
-    def cache_name(self) -> str:
-        """
-        Get the cache name used for storing the attribute in the instance's __dict__.
-
-        Returns:
-            str: The cache name, which is the attribute name prefixed with an underscore.
-        """
-        return f"_{self.name}"
-    
-    @property
-    def key(self) -> str:
-        """
-        Get the session state key for this attribute.
-
-        Returns:
-            str: The session state key in the format '<instance_key>.<attribute_name>'.
-        """
-        if self._key is None:
-            raise ValueError("SessionVar key not set")
-        return self._key
-
     def _make_key(self, instance) -> str:
-        """
-        Construct a unique session state key for this attribute in the given instance.
-
-        Args:
-            instance: The instance of the class containing the attribute.
-
-        Returns:
-            str: A unique key in the format '<instance_key>.<attribute_name>'.
-        """
-        self._key = f"{instance.__instance_key__}.{self.name}"
-        return self._key
+        return f"{instance.__instance_key__}.{self.name}"
 
     def __get__(self, instance, owner) -> Any:
-        """
-        Retrieve the attribute value from Streamlit's session state.
+        if instance is None:
+            return self  # Allow access to the descriptor via the class
 
-        If the session state does not contain the key for this attribute, it is initialized
-        with the cached value from the instance. If the session state value differs from the
-        instance's cached value, the cache is updated accordingly.
-
-        Args:
-            instance: The instance from which to retrieve the attribute.
-            owner: The owner class.
-
-        Returns:
-            Any: The value stored in the session state for this attribute.
-        """
-        key: str = self._make_key(instance=instance)
-        require_valid_user_key(key=key)
+        key: str = self._make_key(instance)
+        require_valid_user_key(key)
         state: SafeSessionState = get_session_state()
-        cached: Any = instance.__dict__.get(self.cache_name)
 
-        if key not in state:
-            state[key] = cached
-        elif state[key] != cached:
-            instance.__dict__[self.cache_name] = state[key]
+        # Retrieve cached value
+        if key in state:
+            value = state[key]
+        else:
+            value = None
 
-        return state[key]
+        # Store in instance cache with a read-only key
+        wrapped = SessionVar._Wrapper(value, key, self, instance)
+        instance.__dict__[self.name] = wrapped
+        return wrapped
 
     def __set__(self, instance, value) -> None:
-        """
-        Set the attribute value in both the instance's cache and Streamlit's session state.
+        """Stores a new value while preserving the read-only key."""
+        key: str = self._make_key(instance)
+        require_valid_user_key(key)
+        state: SafeSessionState = get_session_state()
 
-        Args:
-            instance: The instance whose attribute is to be set.
-            value: The new value for the attribute.
-        """
-
-        key: str = self._make_key(instance=instance)
-        instance.__dict__[self.cache_name] = value
-        require_valid_user_key(key=key)
-        get_session_state()[key] = value
+        # Update value and ensure it's wrapped
+        wrapped = SessionVar._Wrapper(value, key, self, instance)
+        instance.__dict__[self.name] = wrapped
+        state[key] = value  # Store only value (key is derived)
 
 
 class MetaSessionState(type):
