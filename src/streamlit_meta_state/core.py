@@ -32,6 +32,10 @@ class SessionVar:
         """
         self.name: str = name
 
+        # Store the session state key for this attribute, generated when
+        # `_make_key` is called.
+        self._key: str | None = None
+
     @property
     def cache_name(self) -> str:
         """
@@ -41,6 +45,18 @@ class SessionVar:
             str: The cache name, which is the attribute name prefixed with an underscore.
         """
         return f"_{self.name}"
+    
+    @property
+    def key(self) -> str:
+        """
+        Get the session state key for this attribute.
+
+        Returns:
+            str: The session state key in the format '<instance_key>.<attribute_name>'.
+        """
+        if self._key is None:
+            raise ValueError("SessionVar key not set")
+        return self._key
 
     def _make_key(self, instance) -> str:
         """
@@ -52,7 +68,8 @@ class SessionVar:
         Returns:
             str: A unique key in the format '<instance_key>.<attribute_name>'.
         """
-        return f"{instance.__instance_key__}.{self.name}"
+        self._key = f"{instance.__instance_key__}.{self.name}"
+        return self._key
 
     def __get__(self, instance, owner) -> Any:
         """

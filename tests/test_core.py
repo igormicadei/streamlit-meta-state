@@ -22,7 +22,7 @@ if st.button(label=f"Increase '{my_instance.name}'"):
     st.rerun()
 
 st.text_input(
-    label="MyPersistentClass.name", key=f"{my_instance.__instance_key__}.name"
+    label="MyPersistentClass.name", key=my_instance.name.key
 )
 
 st.write(f"The current value on the 'MyPersistentClass.name' is '{my_instance.name}'")
